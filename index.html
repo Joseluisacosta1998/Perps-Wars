@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Perp Wars — HYPE · ASTER · LIT</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" />
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0B0E14; color: #E8EAED; font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.45} }
+  input::placeholder { color: #5A6472; }
+  button { cursor: pointer; }
+  a { text-decoration: none; }
+  details summary { cursor: pointer; list-style: none; }
+  details summary::-webkit-details-marker { display: none; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #262E3D; border-radius: 4px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+
+<script type="text/babel" data-type="module">
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+// ---- Token registry -------------------------------------------------
+const TOKENS = [
+  {
+    id: "hyperliquid",
+    symbol: "HYPE",
+    name: "Hyperliquid",
+    accent: "#2DE0C6",
+    newsPattern: /\bhyperliquid\b/i,
+    catalyst: "Desbloqueo de ~9.9M tokens (~$630M) previsto para el 6 de julio de 2026: puede presionar el precio a la baja.",
+  },
+  {
+    id: "aster-2",
+    symbol: "ASTER",
+    name: "Aster",
+    accent: "#FF5C8D",
+    newsPattern: /\baster\b/i,
+    catalyst: "Bajo presión por críticas de venta interna y opacidad en recompras; un analista mantiene un objetivo alcista de largo plazo.",
+  },
+  {
+    id: "lighter",
+    symbol: "LIT",
+    name: "Lighter",
+    accent: "#FFB020",
+    newsPattern: /\blighter\b/i,
+    catalyst: "El protocolo quema tokens recomprados y financia staking desde la reserva del ecosistema: señal tokenómica favorable.",
+  },
+];
+
+const IDS = TOKENS.map((t) => t.id).join(",");
+const MARKET_URL = `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=${IDS}&sparkline=true&price_change_percentage=24h`;
+const NEWS_URL = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&sortOrder=latest";
+const chartUrl = (id) => `https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=7&interval=hourly`;
+
+const MARKET_REFRESH_MS = 60000;
+const SIGNAL_REFRESH_MS = 300000;
+const NEWS_REFRESH_MS = 300000;
+
+const SOURCE_LINKS = [
+  { label: "CoinDesk", url: "https://www.coindesk.com/" },
+  { label: "The Block", url: "https://www.theblock.co/" },
+  { label: "DeFiLlama · Perps", url: "https://defillama.com/perps" },
+  { label: "CoinGecko · Perpetuals", url: "https://www.coingecko.com/en/categories/decentralized-perpetuals" },
+  { label: "TradingView", url: "https://www.tradingview.com/" },
+];
+
+// ---- Formatting helpers ----------------------------------------------
+function fmtPrice(n) {
+  if (n == null) return "—";
+  if (n >= 100) return n.toLocaleString("es-ES", { maximumFractionDigits: 2 });
+  if (n >= 1) return n.toLocaleString("es-ES", { maximumFractionDigits: 3 });
+  return n.toLocaleString("es-ES", { maximumFractionDigits: 5 });
+}
+function fmtCompact(n) {
+  if (n == null) return "—";
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  return n.toString();
+}
+function fmtAgo(ts, now) {
+  if (!ts) return "—";
+  const s = Math.max(0, Math.floor((now - ts) / 1000));
+  if (s < 60) return `hace ${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `hace ${m}m`;
+  const h = Math.floor(m / 60);
+  return `hace ${h}h`;
+}
+function fmtDateTime(ts) {
+  return new Date(ts).toLocaleString("es-ES", {
+    day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
+  });
+}
+
+// ---- Technical signal engine ------------------------------------------
+function sma(arr, n) {
+  const slice = arr.slice(-n);
+  if (!slice.length) return null;
+  return slice.reduce((a, b) => a + b, 0) / slice.length;
+}
+function rsi(prices, period = 14) {
+  if (prices.length < period + 1) return null;
+  let gains = 0, losses = 0;
+  for (let i = 1; i <= period; i++) {
+    const diff = prices[i] - prices[i - 1];
+    if (diff >= 0) gains += diff; else losses -= diff;
+  }
+  let avgGain = gains / period, avgLoss = losses / period;
+  for (let i = period + 1; i < prices.length; i++) {
+    const diff = prices[i] - prices[i - 1];
+    const gain = diff > 0 ? diff : 0;
+    const loss = diff < 0 ? -diff : 0;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
+  }
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - 100 / (1 + rs);
+}
+function buildSignal(prices, change24h, volumeRatio) {
+  if (!prices || prices.length < 20) return null;
+  const last = prices[prices.length - 1];
+  const s20 = sma(prices, 20);
+  const s50 = sma(prices, Math.min(50, prices.length));
+  const r = rsi(prices, 14);
+  let score = 0;
+  const reasons = [];
+
+  if (last > s20 && s20 > s50) {
+    score += 1;
+    reasons.push("Precio por encima de sus medias de 20h y 50h — tendencia de corto plazo alcista.");
+  } else if (last < s20 && s20 < s50) {
+    score -= 1;
+    reasons.push("Precio por debajo de sus medias de 20h y 50h — tendencia de corto plazo bajista.");
+  } else {
+    reasons.push("Medias móviles sin alineación clara — tendencia mixta.");
+  }
+
+  if (r != null) {
+    if (r > 70) { score -= 1; reasons.push(`RSI(14) en ${r.toFixed(0)} — zona de sobrecompra, riesgo de corrección.`); }
+    else if (r < 30) { score += 1; reasons.push(`RSI(14) en ${r.toFixed(0)} — zona de sobreventa, posible rebote.`); }
+    else { reasons.push(`RSI(14) en ${r.toFixed(0)} — sin condición extrema.`); }
+  }
+
+  if (change24h != null) {
+    if (change24h >= 5) { score += 1; reasons.push(`Momentum fuerte: +${change24h.toFixed(1)}% en 24h.`); }
+    else if (change24h <= -5) { score -= 1; reasons.push(`Momentum negativo: ${change24h.toFixed(1)}% en 24h.`); }
+  }
+
+  if (volumeRatio != null) {
+    if (volumeRatio >= 1.5) { score += 1; reasons.push(`Volumen 24h ${Math.round((volumeRatio - 1) * 100)}% por encima del promedio semanal — el movimiento tiene respaldo.`); }
+    else if (volumeRatio <= 0.5) { reasons.push("Volumen 24h muy por debajo del promedio semanal — posible falta de convicción."); }
+  }
+
+  let label, color;
+  if (score >= 2) { label = "Señal de compra"; color = "#3DDC97"; }
+  else if (score === 1) { label = "Sesgo alcista"; color = "#8FE3C4"; }
+  else if (score === 0) { label = "Neutral"; color = "#8A93A3"; }
+  else if (score === -1) { label = "Sesgo bajista"; color = "#FFB4A8"; }
+  else { label = "Señal de venta"; color = "#FF6B6B"; }
+
+  return { score, label, color, reasons, rsi: r, sma20: s20, sma50: s50 };
+}
+
+// ---- Small visual components -------------------------------------------
+function Sparkline({ points, color }) {
+  if (!points || points.length < 2) return <div style={{ height: 46 }} />;
+  const w = 240, h = 46, pad = 3;
+  const min = Math.min(...points), max = Math.max(...points);
+  const span = max - min || 1;
+  const step = (w - pad * 2) / (points.length - 1);
+  const d = points.map((p, i) => {
+    const x = pad + i * step;
+    const y = h - pad - ((p - min) / span) * (h - pad * 2);
+    return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  const last = points[points.length - 1];
+  const lastY = h - pad - ((last - min) / span) * (h - pad * 2);
+  return (
+    <svg width="100%" viewBox={`0 0 ${w} ${h}`} style={{ display: "block" }}>
+      <path d={d} fill="none" stroke={color} strokeWidth="1.6" opacity="0.9" />
+      <circle cx={w - pad} cy={lastY} r="2.4" fill={color} />
+    </svg>
+  );
+}
+
+function Track({ tokens, data }) {
+  const changes = tokens.map((t) => data[t.id]?.price_change_percentage_24h ?? 0);
+  const min = Math.min(-5, ...changes);
+  const max = Math.max(5, ...changes);
+  const span = max - min || 1;
+  return (
+    <div style={styles.track}>
+      <div style={styles.trackLabelRow}>
+        <span style={styles.trackLabel}>{min.toFixed(1)}%</span>
+        <span style={{ ...styles.trackLabel, opacity: 0.4 }}>24h</span>
+        <span style={styles.trackLabel}>{max.toFixed(1)}%</span>
+      </div>
+      <div style={styles.trackLane}>
+        <div style={styles.trackZero} />
+        {tokens.map((t) => {
+          const chg = data[t.id]?.price_change_percentage_24h ?? 0;
+          const pct = ((chg - min) / span) * 100;
+          return (
+            <div key={t.id} title={`${t.symbol} ${chg.toFixed(2)}%`}
+              style={{ ...styles.trackMarker, left: `${pct}%`, background: t.accent, boxShadow: `0 0 12px ${t.accent}88` }}>
+              {t.symbol}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function SignalBadge({ signal }) {
+  if (!signal) return <div style={styles.signalPlaceholder}>Calculando señal…</div>;
+  return (
+    <details style={styles.signalDetails}>
+      <summary style={{ ...styles.signalSummary, borderColor: signal.color + "55", background: signal.color + "14" }}>
+        <span style={{ width: 8, height: 8, borderRadius: 99, background: signal.color, display: "inline-block", marginRight: 8 }} />
+        <span style={{ color: signal.color, fontWeight: 600 }}>{signal.label}</span>
+        <span style={styles.signalCaret}>▾ por qué</span>
+      </summary>
+      <ul style={styles.reasonList}>
+        {signal.reasons.map((r, i) => <li key={i} style={styles.reasonItem}>{r}</li>)}
+      </ul>
+    </details>
+  );
+}
+
+function NewsPanel({ feed, loading, error, now }) {
+  const [tab, setTab] = useState("all");
+  const filtered = tab === "all" ? feed : feed.filter((a) => a.tags.includes(tab));
+  return (
+    <div style={styles.newsCard}>
+      <div style={styles.newsHeader}>
+        <div style={styles.cardHeading}>Noticias relacionadas</div>
+        <div style={styles.tabRow}>
+          <button onClick={() => setTab("all")} style={{ ...styles.tab, ...(tab === "all" ? styles.tabActive : {}) }}>Todas</button>
+          {TOKENS.map((t) => (
+            <button key={t.id} onClick={() => setTab(t.id)}
+              style={{ ...styles.tab, ...(tab === t.id ? { ...styles.tabActive, borderColor: t.accent, color: t.accent } : {}) }}>
+              {t.symbol}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {error && <div style={styles.errorBanner}>{error}</div>}
+      {!error && loading && <div style={styles.newsEmpty}>Buscando noticias…</div>}
+      {!error && !loading && filtered.length === 0 && (
+        <div style={styles.newsEmpty}>Sin coincidencias recientes para este filtro. Prueba con "Todas" o revisa las fuentes de abajo.</div>
+      )}
+
+      <div style={styles.newsList}>
+        {filtered.slice(0, 15).map((a) => (
+          <a key={a.id} href={a.url} target="_blank" rel="noreferrer" style={styles.newsItem}>
+            <div style={styles.newsMeta}>
+              <span style={styles.newsSource}>{a.source}</span>
+              <span style={styles.newsDot}>·</span>
+              <span>{fmtDateTime(a.publishedAt)}</span>
+              <span style={styles.newsDot}>·</span>
+              <span style={{ color: "#6B7686" }}>{fmtAgo(a.publishedAt, now)}</span>
+              <span style={{ flex: 1 }} />
+              {a.tags.map((id) => {
+                const t = TOKENS.find((x) => x.id === id);
+                return <span key={id} style={{ ...styles.newsTag, color: t.accent, borderColor: t.accent + "66" }}>{t.symbol}</span>;
+              })}
+            </div>
+            <div style={styles.newsTitle}>{a.title} ↗</div>
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Dashboard() {
+  const [market, setMarket] = useState({});
+  const [marketLoading, setMarketLoading] = useState(true);
+  const [marketError, setMarketError] = useState(null);
+  const [marketUpdated, setMarketUpdated] = useState(null);
+
+  const [signals, setSignals] = useState({});
+  const [signalsUpdated, setSignalsUpdated] = useState(null);
+
+  const [newsFeed, setNewsFeed] = useState([]);
+  const [newsLoading, setNewsLoading] = useState(true);
+  const [newsError, setNewsError] = useState(null);
+  const [newsUpdated, setNewsUpdated] = useState(null);
+
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const loadMarket = useCallback(async () => {
+    try {
+      setMarketError(null);
+      const res = await fetch(MARKET_URL);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      const byId = {};
+      json.forEach((c) => {
+        byId[c.id] = {
+          price: c.current_price,
+          price_change_percentage_24h: c.price_change_percentage_24h,
+          market_cap: c.market_cap,
+          total_volume: c.total_volume,
+          sparkline: c.sparkline_in_7d?.price,
+        };
+      });
+      setMarket(byId);
+      setMarketUpdated(Date.now());
+    } catch (e) {
+      setMarketError("No se pudo conectar con la API de precios. Reintentando…");
+    } finally {
+      setMarketLoading(false);
+    }
+  }, []);
+
+  const loadSignals = useCallback(async () => {
+    try {
+      const results = await Promise.all(
+        TOKENS.map(async (t) => {
+          const res = await fetch(chartUrl(t.id));
+          if (!res.ok) throw new Error("chart fetch failed");
+          const json = await res.json();
+          const prices = (json.prices || []).map((p) => p[1]);
+          const volumes = (json.total_volumes || []).map((v) => v[1]);
+          const lastVol = volumes[volumes.length - 1];
+          const avgVol = volumes.length ? volumes.reduce((a, b) => a + b, 0) / volumes.length : null;
+          const volumeRatio = lastVol && avgVol ? lastVol / avgVol : null;
+          const change24h = prices.length >= 25 ? ((prices[prices.length - 1] - prices[prices.length - 25]) / prices[prices.length - 25]) * 100 : null;
+          return [t.id, buildSignal(prices, change24h, volumeRatio)];
+        })
+      );
+      setSignals(Object.fromEntries(results));
+      setSignalsUpdated(Date.now());
+    } catch (e) {
+      // keep previous signals silently; market data still updates
+    }
+  }, []);
+
+  const loadNews = useCallback(async () => {
+    try {
+      setNewsError(null);
+      const res = await fetch(NEWS_URL);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      const articles = json.Data || [];
+      const flat = [];
+      articles.forEach((a) => {
+        const text = `${a.title || ""} ${a.body || ""}`;
+        const tags = TOKENS.filter((t) => t.newsPattern.test(text)).map((t) => t.id);
+        if (tags.length) {
+          flat.push({
+            id: a.id,
+            title: a.title,
+            url: a.url || a.guid,
+            source: a.source_info?.name || a.source || "Fuente",
+            publishedAt: (a.published_on || 0) * 1000,
+            tags,
+          });
+        }
+      });
+      flat.sort((a, b) => b.publishedAt - a.publishedAt);
+      setNewsFeed(flat);
+      setNewsUpdated(Date.now());
+    } catch (e) {
+      setNewsError("No se pudo cargar el feed de noticias ahora mismo. Usa las fuentes de abajo mientras tanto.");
+    } finally {
+      setNewsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadMarket();
+    const id = setInterval(loadMarket, MARKET_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [loadMarket]);
+
+  useEffect(() => {
+    loadSignals();
+    const id = setInterval(loadSignals, SIGNAL_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [loadSignals]);
+
+  useEffect(() => {
+    loadNews();
+    const id = setInterval(loadNews, NEWS_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [loadNews]);
+
+  return (
+    <div style={styles.page}>
+      <header style={styles.header}>
+        <div>
+          <div style={styles.eyebrow}>DEX PERPETUOS · SEÑALES AUTOMÁTICAS</div>
+          <h1 style={styles.title}>Perp Wars</h1>
+          <div style={styles.subtitle}>HYPE · ASTER · LIT — precio, técnica y noticias en un panel</div>
+        </div>
+        <div style={styles.headerRight}>
+          <div style={styles.updatedText}>Precios {fmtAgo(marketUpdated, now)} · Señales {fmtAgo(signalsUpdated, now)} · Noticias {fmtAgo(newsUpdated, now)}</div>
+          <button onClick={() => { loadMarket(); loadSignals(); loadNews(); }} style={styles.refreshBtn}>↻ Actualizar todo</button>
+        </div>
+      </header>
+
+      {marketError && <div style={styles.errorBanner}>{marketError}</div>}
+
+      <Track tokens={TOKENS} data={market} />
+
+      <div style={styles.grid}>
+        {TOKENS.map((t) => {
+          const d = market[t.id] || {};
+          const chg = d.price_change_percentage_24h;
+          const up = chg >= 0;
+          const signal = signals[t.id];
+          const isStrong = signal && Math.abs(signal.score) >= 2;
+          return (
+            <div key={t.id} style={{
+              ...styles.card,
+              borderColor: isStrong ? signal.color : "#1C2230",
+              animation: isStrong ? "pulse 1.4s ease-in-out infinite" : "none",
+            }}>
+              <div style={styles.cardTop}>
+                <div>
+                  <div style={{ ...styles.symbol, color: t.accent }}>{t.symbol}</div>
+                  <div style={styles.name}>{t.name}</div>
+                </div>
+                <div style={styles.priceBlock}>
+                  <div style={styles.price}>{marketLoading ? "…" : `$${fmtPrice(d.price)}`}</div>
+                  <div style={{ color: up ? "#3DDC97" : "#FF6B6B", fontWeight: 600 }}>
+                    {chg != null ? `${up ? "+" : ""}${chg.toFixed(2)}%` : "—"}
+                  </div>
+                </div>
+              </div>
+
+              <Sparkline points={d.sparkline} color={t.accent} />
+
+              <div style={styles.statsRow}>
+                <div><div style={styles.statLabel}>Cap. mercado</div><div style={styles.statValue}>${fmtCompact(d.market_cap)}</div></div>
+                <div><div style={styles.statLabel}>Vol. 24h</div><div style={styles.statValue}>${fmtCompact(d.total_volume)}</div></div>
+              </div>
+
+              <div style={styles.signalWrap}><SignalBadge signal={signal} /></div>
+
+              <div style={styles.catalyst}><span style={{ color: t.accent }}>◆ </span>{t.catalyst}</div>
+            </div>
+          );
+        })}
+      </div>
+
+      <NewsPanel feed={newsFeed} loading={newsLoading} error={newsError} now={now} />
+
+      <div style={styles.footerGrid}>
+        <div style={styles.linksCard}>
+          <div style={styles.cardHeading}>Más fuentes</div>
+          <div style={styles.linksList}>
+            {SOURCE_LINKS.map((l) => (
+              <a key={l.url} href={l.url} target="_blank" rel="noreferrer" style={styles.link}>{l.label} ↗</a>
+            ))}
+          </div>
+        </div>
+        <div style={styles.noteCard}>
+          <div style={styles.cardHeading}>Cómo se generan las señales</div>
+          <p style={styles.note}>
+            Cada señal combina cuatro lecturas automáticas sobre los datos horarios de los últimos 7 días: cruce de medias móviles (20h/50h),
+            RSI(14) para sobrecompra/sobreventa, momentum de 24h y una comparación del volumen actual contra el promedio semanal.
+            No hace falta configurar nada — se recalcula sola cada 5 minutos. Esto es información técnica automatizada, no una recomendación
+            de inversión: combínalo siempre con tu propio análisis.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const styles = {
+  page: { minHeight: "100vh", padding: "28px 20px 40px", boxSizing: "border-box" },
+  header: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12, marginBottom: 22 },
+  eyebrow: { fontSize: 11, letterSpacing: "0.14em", color: "#6B7686" },
+  title: { fontFamily: "'Space Grotesk', ui-sans-serif, sans-serif", fontSize: 34, fontWeight: 700, margin: "4px 0 2px", letterSpacing: "-0.01em" },
+  subtitle: { color: "#8A93A3", fontSize: 13 },
+  headerRight: { textAlign: "right" },
+  updatedText: { fontSize: 11, color: "#6B7686", marginBottom: 6 },
+  refreshBtn: { background: "#151A24", border: "1px solid #262E3D", color: "#E8EAED", borderRadius: 6, padding: "6px 12px", fontFamily: "inherit", fontSize: 12 },
+  errorBanner: { background: "#3B1520", border: "1px solid #5C2233", color: "#FFB4C0", padding: "8px 14px", borderRadius: 8, fontSize: 12, marginBottom: 16 },
+  track: { background: "#10141C", border: "1px solid #1C2230", borderRadius: 12, padding: "16px 18px 20px", marginBottom: 22 },
+  trackLabelRow: { display: "flex", justifyContent: "space-between", fontSize: 10, color: "#6B7686", marginBottom: 10, letterSpacing: "0.05em" },
+  trackLabel: {},
+  trackLane: { position: "relative", height: 40, background: "repeating-linear-gradient(90deg, #161C27 0, #161C27 1px, transparent 1px, transparent 40px)", borderTop: "1px solid #1C2230", borderBottom: "1px solid #1C2230" },
+  trackZero: { position: "absolute", left: "50%", top: 0, bottom: 0, width: 1, background: "#262E3D" },
+  trackMarker: { position: "absolute", top: "50%", transform: "translate(-50%,-50%)", fontSize: 10, fontWeight: 700, color: "#0B0E14", padding: "4px 7px", borderRadius: 20, transition: "left 0.6s ease", whiteSpace: "nowrap" },
+  grid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16, marginBottom: 22 },
+  card: { background: "#10141C", border: "1px solid #1C2230", borderRadius: 12, padding: 16, transition: "border-color 0.3s ease" },
+  cardTop: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 },
+  symbol: { fontSize: 18, fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif" },
+  name: { fontSize: 11, color: "#6B7686" },
+  priceBlock: { textAlign: "right" },
+  price: { fontSize: 18, fontWeight: 600 },
+  statsRow: { display: "flex", justifyContent: "space-between", marginTop: 10, paddingTop: 10, borderTop: "1px solid #1C2230" },
+  statLabel: { fontSize: 10, color: "#6B7686" },
+  statValue: { fontSize: 13, marginTop: 2 },
+  signalWrap: { marginTop: 12 },
+  signalPlaceholder: { fontSize: 11.5, color: "#6B7686", padding: "8px 0" },
+  signalDetails: { border: "1px solid #1C2230", borderRadius: 8, overflow: "hidden" },
+  signalSummary: { display: "flex", alignItems: "center", padding: "8px 10px", fontSize: 12.5, border: "1px solid transparent" },
+  signalCaret: { marginLeft: "auto", fontSize: 10.5, color: "#6B7686" },
+  reasonList: { margin: 0, padding: "8px 14px 10px 26px", fontSize: 11.5, lineHeight: 1.6, color: "#9AA3B2" },
+  reasonItem: { marginBottom: 2 },
+  catalyst: { fontSize: 11.5, lineHeight: 1.5, color: "#9AA3B2", marginTop: 12, paddingTop: 12, borderTop: "1px solid #1C2230" },
+  newsCard: { background: "#10141C", border: "1px solid #1C2230", borderRadius: 12, padding: 16, marginBottom: 16 },
+  newsHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 12 },
+  tabRow: { display: "flex", gap: 6 },
+  tab: { background: "#151A24", border: "1px solid #262E3D", color: "#8A93A3", borderRadius: 20, padding: "4px 12px", fontSize: 11.5, fontFamily: "inherit" },
+  tabActive: { background: "#1A2130", color: "#E8EAED" },
+  newsEmpty: { fontSize: 12, color: "#6B7686", padding: "10px 0" },
+  newsList: { display: "flex", flexDirection: "column", gap: 2, maxHeight: 420, overflowY: "auto" },
+  newsItem: { display: "block", padding: "10px 8px", borderRadius: 8, borderBottom: "1px solid #161C27" },
+  newsMeta: { display: "flex", alignItems: "center", gap: 6, fontSize: 10.5, color: "#8A93A3", marginBottom: 4, flexWrap: "wrap" },
+  newsSource: { color: "#C9CFDA", fontWeight: 600 },
+  newsDot: { color: "#3A4252" },
+  newsTag: { border: "1px solid", borderRadius: 20, padding: "1px 7px", fontSize: 10, fontWeight: 700 },
+  newsTitle: { fontSize: 13, color: "#E8EAED", lineHeight: 1.4 },
+  footerGrid: { display: "grid", gridTemplateColumns: "minmax(220px,1fr) minmax(220px,1.4fr)", gap: 16 },
+  linksCard: { background: "#10141C", border: "1px solid #1C2230", borderRadius: 12, padding: 16 },
+  noteCard: { background: "#10141C", border: "1px solid #1C2230", borderRadius: 12, padding: 16 },
+  cardHeading: { fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 700, marginBottom: 10, color: "#C9CFDA" },
+  linksList: { display: "flex", flexDirection: "column", gap: 8 },
+  link: { color: "#2DE0C6", fontSize: 12.5 },
+  note: { fontSize: 12, lineHeight: 1.6, color: "#8A93A3", margin: 0 },
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Dashboard />);
+</script>
+</body>
+</html>
